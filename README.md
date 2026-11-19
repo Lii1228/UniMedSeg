@@ -14,10 +14,18 @@ python -m pip install -r requirements.txt
 
 Place the weight files in `UniMedSeg/checkpoints/`. Each exported checkpoint contains the backbone, the text projection, and the settings needed to reconstruct that model. Training and evaluation use strict parameter loading.
 
-| Model | Weight file | Width | Transformer blocks | Attention heads |
-| --- | --- | ---: | ---: | ---: |
-| UniMedSeg-S | [UniMedSeg-S.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-S.ckpt) | 432 | 12 | 6 |
-| UniMedSeg-L | [UniMedSeg-L.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-L.ckpt) | 864 | 20 | 12 |
+| Model | Backbone entry point | Weight file | Width | Transformer blocks | Attention heads |
+| --- | --- | --- | ---: | ---: | ---: |
+| UniMedSeg-S | [primus_icl_s](UniMedSeg/models/PrimusS_ICL.py) | [UniMedSeg-S.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-S.ckpt) | 432 | 12 | 6 |
+| UniMedSeg-L | [primus_icl_l](UniMedSeg/models/PrimusL_ICL.py) | [UniMedSeg-L.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-L.ckpt) | 864 | 20 | 12 |
+
+Both sizes use the same [PrimusICL implementation](UniMedSeg/models/primus_icl.py). Train L with `--variant L`. To construct its backbone directly in Python, use the following import.
+
+```python
+from UniMedSeg.models.PrimusL_ICL import primus_icl_l
+
+backbone = primus_icl_l()
+```
 
 The exported files have these SHA-256 checksums. Run `sha256sum UniMedSeg/checkpoints/*.ckpt` to check a download.
 

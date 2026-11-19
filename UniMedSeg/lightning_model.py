@@ -14,7 +14,7 @@ from torchvision.utils import save_image
 from .checkpoints import model_variant
 
 # Import Model
-from .models.PrimusS_ICL import build_primus
+from .models.backbones import build_primus
 from .tool.imagefilter import GINGroupConv_3D
 from .tool.losses import GradientLoss, SmoothL3_L1Loss, sigmoid_modified
 from .tool.metrics import dice_score
