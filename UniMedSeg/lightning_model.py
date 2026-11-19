@@ -33,7 +33,6 @@ from .tool.prompt_generators import (
     randomized_slice_points_3d,
     randomized_slice_rects_3d,
 )
-from .tool.slice_alignment import prepare_aligned_batch
 
 # Import text-driven module
 from .tool.text_guide import TextEmbeddingAdapter
@@ -546,11 +545,6 @@ class LightningModel(pl.LightningModule):
             ns_list = [val, val, val]
         else:
             ns_list = [4, 4, 4]
-
-        if self.hparams.get("stage") == "stage1":
-            return prepare_aligned_batch(
-                imgs_3d, labs_3d, flipped_status_group, ns_list
-            )
 
         target_in_list = []
         target_out_list = []

@@ -51,15 +51,10 @@ def parse_args():
         "--data_dir", required=True, help="Root containing nnU-Net dataset directories."
     )
     p.add_argument(
-        "--stage",
-        choices=["stage1", "stage2", "stage2_weaktune"],
-        default="stage2_weaktune",
-        help="Select the server task-sampling manifest.",
-    )
-    p.add_argument(
         "--task_config",
         type=Path,
-        help="Override the stage manifest with a task list in JSON.",
+        default=Path(__file__).with_name("train.json"),
+        help="Training task list in JSON.",
     )
     checkpoints = p.add_mutually_exclusive_group()
     checkpoints.add_argument(
@@ -159,8 +154,7 @@ def parse_args():
 
 
 def make_loaders(args):
-    config = args.task_config or Path(__file__).with_name(args.stage + ".json")
-    tasks = json.loads(config.read_text(encoding="utf-8"))
+    tasks = json.loads(args.task_config.read_text(encoding="utf-8"))
     train_transform = (
         MetaDatasetf_transform_1channel(
             flip_prob=args.flip_prob, sobel_prob=args.sobel_prob
@@ -204,7 +198,6 @@ def main():
             if k
             in {
                 "variant",
-                "stage",
                 "grad_checkpointing",
                 "lr",
                 "lr_decline_patience",
