@@ -1,216 +1,199 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-import pytorch_lightning as pl
-import os
 import json
-import numpy as np
+import os
+import sys
 import types
 from datetime import datetime
-import warnings
-import sys
+
+import torch
+from torch.utils.data import DataLoader
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
+from config import evaluation_trainer, get_parser
 from dataloader import MetaDataset_Multi_Extended
-from config import get_parser
-
-try:
-    from utils.pairwise_measures import BinaryPairwiseMeasures as PM
-except ImportError:
-    print("Warning: Could not import BinaryPairwiseMeasures. Metrics might be unavailable.")
-    PM = None
+from UniMedSeg.tool.metrics import dice_score
 
 args = get_parser().parse_args()
 
-print("="*60)
+print("=" * 60)
 print("Running UniMedSeg Text-Prompt Mode in Open-Source")
-print("="*60)
+print("=" * 60)
 
-sample_config_path = os.path.join(PROJECT_ROOT, 'Brain','Brain.json')
+sample_config_path = os.path.join(PROJECT_ROOT, "Brain", "Brain.json")
 
 args.data_dir = PROJECT_ROOT
 
 try:
-    with open(sample_config_path, 'r') as f:
+    with open(sample_config_path, "r") as f:
         data_loading_config = json.load(f)
-    current_task_name = data_loading_config[0]['name']
+    current_task_name = data_loading_config[0]["name"]
     print(f"Successfully loaded open-source text config for: {current_task_name}")
     print(f"Config details: {len(data_loading_config)} dataset(s) loaded")
 except Exception as e:
-    raise RuntimeError(f"Failed to load sample text config. Please ensure 'sample_config_text.json' exists. Error: {e}")
+    raise RuntimeError(
+        f"Failed to load sample text config. Please ensure 'sample_config_text.json' exists. Error: {e}"
+    )
 
-assert args.checkpoint_path is not None, "The checkpoint_path should not be None!"
-checkpoint_path = args.checkpoint_path
-tmp = sorted([i for i in os.listdir(checkpoint_path) if i.endswith('.ckpt') or i.endswith('.pth')])
-if args.checkpoint_index < 0:
-    checkpoint_idx = len(tmp) + args.checkpoint_index
-else:
-    checkpoint_idx = args.checkpoint_index
+from UniMedSeg.checkpoints import resolve_checkpoint
+from UniMedSeg.lightning_model import LightningModel
 
-if 0 <= checkpoint_idx < len(tmp):
-    selected_ckpt = tmp[checkpoint_idx]
-else:
-    selected_ckpt = tmp[-1] 
+checkpoint_path = resolve_checkpoint(args.checkpoint_path, args.checkpoint_index)
+model = LightningModel.load_from_checkpoint(
+    checkpoint_path, map_location="cpu", strict=True
+)
 
-checkpoint_path = os.path.join(checkpoint_path, selected_ckpt)
-print(f'Loading checkpoint from: {checkpoint_path}')
-
-model_module = f'from {args.model_name}.lightning_model import LightningModel'
-print(model_module)
-exec(model_module)
-
-warnings.filterwarnings('ignore')
-model = LightningModel.load_from_checkpoint(checkpoint_path, map_location=torch.device(args.device))
-
-model.to(args.device)
 model.eval()
 
-model.prob_2d = 0       
-model.num_slices = 1   
+model.prob_2d = 0
+model.num_slices = 1
 
 target_dataset_names = []
 if isinstance(data_loading_config, list):
     for item in data_loading_config:
-        if 'name' in item:
-            target_dataset_names.append(item['name'])
+        if "name" in item:
+            target_dataset_names.append(item["name"])
 elif isinstance(data_loading_config, dict):
-    if 'name' in data_loading_config:
-        target_dataset_names.append(data_loading_config['name'])
+    if "name" in data_loading_config:
+        target_dataset_names.append(data_loading_config["name"])
 
 print(f"Datasets in this task: {target_dataset_names}")
 
-if hasattr(model, 'text_enabled_datasets'):
+if hasattr(model, "text_enabled_datasets"):
     updated_list = list(set(model.text_enabled_datasets + target_dataset_names))
     model.text_enabled_datasets = updated_list
     print(f"Updated Text Whitelist: {model.text_enabled_datasets}")
 
 dataset_val = MetaDataset_Multi_Extended(
-        dataset_dir = args.data_dir, 
-        skip_resize = args.skip_resize,
-        data_loading_config = data_loading_config, 
-        train_or_val = 'val',
-        train_or_val_split_rate = args.train_or_val_split_rate,
-        group_size = args.context_size+1,
-        cut_length = True 
+    dataset_dir=args.data_dir,
+    skip_resize=args.skip_resize,
+    data_loading_config=data_loading_config,
+    train_or_val="val",
+    train_or_val_split_rate=args.train_or_val_split_rate,
+    group_size=args.context_size + 1,
+    cut_length=True,
 )
-dataset_val.len_divid = 4 
+dataset_val.len_divid = 4
 
-dataloader_val = DataLoader(dataset_val, 
-                            batch_size=args.batch_size,
-                            num_workers=args.workers,
-                            pin_memory=True,
-                            persistent_workers=True)
+dataloader_val = DataLoader(
+    dataset_val,
+    batch_size=args.batch_size,
+    num_workers=args.workers,
+    pin_memory=True,
+    persistent_workers=args.workers > 0,
+)
+
 
 def patched_validation_step(self, batch, batch_idx):
-    config = getattr(self, 'eval_config', {})
-    
-    target_prompt_type = config.get('visual_prompt', 'dense') 
-    enable_text = config.get('enable_text', False)
-    remove_visual = config.get('remove_visual', False) 
-    
-    dataset_name = batch.get('dataset', ['Unknown'])[0]
-    task = batch['task'][0]
+    config = getattr(self, "eval_config", {})
+
+    target_prompt_type = config.get("visual_prompt", "dense")
+    enable_text = config.get("enable_text", False)
+    remove_visual = config.get("remove_visual", False)
+
+    dataset_name = batch.get("dataset", ["Unknown"])[0]
+    task = batch["task"][0]
 
     def process_input(input_mod):
-        if isinstance(input_mod, str): return input_mod
-        elif isinstance(input_mod, torch.Tensor): return int(input_mod.item())
-        else: return input_mod
-    
-    input_mod = process_input(batch.get('input', [''])[0])
-    output_mod = process_input(batch.get('output', [''])[0])
-    
-    imgs = batch['image'][0, :, None, :]
-    labs = batch['label'][0, :, None, :]
-    
-    target_in = imgs[:1, :]            
+        if isinstance(input_mod, str):
+            return input_mod
+        elif isinstance(input_mod, torch.Tensor):
+            return int(input_mod.item())
+        else:
+            return input_mod
+
+    input_mod = process_input(batch.get("input", [""])[0])
+    output_mod = process_input(batch.get("output", [""])[0])
+
+    imgs = batch["image"][0, :, None, :]
+    labs = batch["label"][0, :, None, :]
+
+    target_in = imgs[:1, :]
     target_out = labs[:1, :]
-    context_in = imgs[None, 1:, :]    
+    context_in = imgs[None, 1:, :]
     context_label_dense = labs[None, 1:, :]
-    
+
     L = context_in.shape[1]
-    
+
     language_tokens = None
     if enable_text and dataset_name in self.text_enabled_datasets:
         target_ids = self._get_target_ids(batch, 1)
         language_tokens = self.text_adapter(target_ids, self.device)
-        
+
     if remove_visual:
         B_dim, C_dim, W_dim, H_dim, D_dim = target_in.shape
-        context_in = torch.zeros((B_dim, 0, C_dim, W_dim, H_dim, D_dim), device=self.device)
-        context_prompt = torch.zeros((B_dim, 0, C_dim, W_dim, H_dim, D_dim), device=self.device)
+        context_in = torch.zeros(
+            (B_dim, 0, C_dim, W_dim, H_dim, D_dim), device=self.device
+        )
+        context_prompt = torch.zeros(
+            (B_dim, 0, C_dim, W_dim, H_dim, D_dim), device=self.device
+        )
     else:
         context_prompt = self.generate_sparse_prompt(
-            context_label_dense.to(self.device), 
-            is_train=False, 
-            specific_prompt_types=[target_prompt_type] * L
+            context_label_dense.to(self.device),
+            is_train=False,
+            specific_prompt_types=[target_prompt_type] * L,
         )
-    
+
     mask = self.forward(
-        target_in.to(self.device), 
-        context_in.to(self.device), 
-        context_prompt.to(self.device), 
-        language_tokens=language_tokens
+        target_in.to(self.device),
+        context_in.to(self.device),
+        context_prompt.to(self.device),
+        language_tokens=language_tokens,
     )
-    
-    if PM is not None:
-        try:
-            p_pred = (mask > 0.5).float().cpu().numpy()
-            p_ref = target_out.float().cpu().numpy()
-            
-            if p_pred.sum() == 0 and p_ref.sum() == 0:
-                dsc = 1.0
-            else:
-                bpm = PM(p_pred, p_ref, dict_args={"nsd": 1, "hd_perc": 95})
-                dsc = bpm.dsc()
-                
-            self.log(f'{dataset_name}_{str(input_mod)}{str(output_mod)}_{task}_DSC', float(dsc))
-            self.log(f'{dataset_name}_DSC', float(dsc))
-            
-        except Exception as e: 
-            pass
 
-    return torch.tensor(0.0, device=self.device) 
+    dsc = dice_score(mask, target_out)
+    self.log(f"{dataset_name}_{input_mod}{output_mod}_{task}_DSC", dsc, batch_size=1)
+    self.log(f"{dataset_name}_DSC", dsc, batch_size=1)
 
-model.eval_config = {} 
+    return torch.tensor(0.0, device=self.device)
+
+
+model.eval_config = {}
 model.validation_step = types.MethodType(patched_validation_step, model)
 print(">> Successfully patched model.validation_step for Scheme C evaluation.")
 
-trainer = pl.Trainer(logger=False, enable_checkpointing=False, accelerator='auto', devices=1)
+trainer = evaluation_trainer(args.device)
 
 eval_scenarios = [
-    {'name': 'Text_Only_SchemeC', 'visual_prompt': 'none', 'enable_text': True,  'remove_visual': True}, 
+    {
+        "name": "Text_Only_SchemeC",
+        "visual_prompt": "none",
+        "enable_text": True,
+        "remove_visual": True,
+    },
 ]
 
 final_results = {}
 
-print("\n" + "="*40)
+print("\n" + "=" * 40)
 print("STARTING EVALUATION LOOP (Scheme C)")
-print("="*40)
+print("=" * 40)
 
 for scenario in eval_scenarios:
-    run_name = scenario['name']
+    run_name = scenario["name"]
     print(f"\n>>> Running Scenario: [{run_name}]")
     print(f"    Config: {scenario}")
-    
+
     model.eval_config = scenario
-    
+
     model.visualize_results = lambda *args, **kwargs: None
-    
+
     trainer.validate(model, dataloaders=dataloader_val)
-    
-    metrics = {k: (v.item() if isinstance(v, torch.Tensor) else v) for k, v in model.trainer.callback_metrics.items()}
-    
+
+    metrics = {
+        k: (v.item() if isinstance(v, torch.Tensor) else v)
+        for k, v in model.trainer.callback_metrics.items()
+    }
+
     main_dsc_key = f"{target_dataset_names[0]}_DSC" if target_dataset_names else "DSC"
     main_dsc = metrics.get(main_dsc_key, "N/A")
     if main_dsc == "N/A":
         for k, v in metrics.items():
-            if k.endswith('DSC'):
+            if k.endswith("DSC"):
                 main_dsc = v
                 break
-                
+
     final_results[run_name] = metrics
     print(f">>> Scenario [{run_name}] Finished. Main DSC: {main_dsc}")
 
@@ -221,17 +204,16 @@ os.makedirs(safe_save_dir, exist_ok=True)
 
 base_ckpt_name = os.path.basename(checkpoint_path)
 new_file_name = base_ckpt_name.replace(
-    '.ckpt', 
-    f'_TextPrompt_Sample_{current_task_name}_{current_time}_results.json'
-).replace('.pth', f'_TextPrompt_Sample_{current_task_name}_{current_time}_results.json')
+    ".ckpt", f"_TextPrompt_Sample_{current_task_name}_{current_time}_results.json"
+).replace(".pth", f"_TextPrompt_Sample_{current_task_name}_{current_time}_results.json")
 
 save_filename = os.path.join(safe_save_dir, new_file_name)
 
 print("\nFinal Results Dict:", json.dumps(final_results, indent=4))
 
-with open(save_filename, 'w') as f:
+with open(save_filename, "w") as f:
     json.dump(final_results, f, indent=4)
 
-print("="*60)
+print("=" * 60)
 print(f"Results saved to: {save_filename}")
-print("="*60)
+print("=" * 60)

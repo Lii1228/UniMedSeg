@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+UniMedSeg/checkpoints/
+runs/
+opensource_eval_results/
+.ruff_cache/

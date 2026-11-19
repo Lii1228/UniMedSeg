@@ -1,199 +1,151 @@
-import torch, torch.nn as nn, torch.utils.data as data, torchvision as tv, torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-import pytorch_lightning as pl
-import os
 import json
-import cv2
-from tqdm import tqdm
-import argparse
-import random
-import PIL
-from PIL import Image
-import matplotlib.pyplot as plt
-import numpy as np
+import os
 import sys
+import types
 from datetime import datetime
-import warnings
-import types  
+
+import torch
+from torch.utils.data import DataLoader
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
-from dataloader import MetaDataset_Multi, Meta_dataset_Sampler, MetaDataset_Multi_Extended, MetaDatasetf_transform_1channel
-from config import get_parser
+from config import evaluation_trainer, get_parser
+from dataloader import MetaDataset_Multi_Extended
 
 args = get_parser().parse_args()
 print(args)
 
-print("="*50)
+print("=" * 50)
 print("Running UniMedSeg 2D Random Retrieval in Open-Source Sample Mode")
-print("="*50)
+print("=" * 50)
 
-sample_config_path = os.path.join(PROJECT_ROOT, 'Liver', 'Liver.json')
+sample_config_path = os.path.join(PROJECT_ROOT, "Liver", "Liver.json")
 
 args.data_dir = PROJECT_ROOT
 
 try:
-    with open(sample_config_path, 'r') as f:
+    with open(sample_config_path, "r") as f:
         data_loading_config = json.load(f)
     print(f"Successfully loaded open-source config from {sample_config_path}")
-    print('The current sample task is:', data_loading_config[0]['name'])
+    print("The current sample task is:", data_loading_config[0]["name"])
 except Exception as e:
     raise RuntimeError(f"Failed to load sample config. Error: {e}")
 # ----------------------------------------
 
-assert args.checkpoint_path is not None, "The checkpoint_path should not be None!"
-checkpoint_path = args.checkpoint_path
-tmp = sorted([i for i in os.listdir(checkpoint_path) if i.endswith('.ckpt') or i.endswith('.pth')])[args.checkpoint_index]
-checkpoint_path = os.path.join(checkpoint_path, tmp)
-print('load check points from:', checkpoint_path)
+from UniMedSeg.checkpoints import resolve_checkpoint
+from UniMedSeg.lightning_model import LightningModel
 
-# Load model
-model_module = f'from {args.model_name}.lightning_model import LightningModel'
-print(model_module)
-exec(model_module)
-
-warnings.filterwarnings('ignore')
-model = LightningModel.load_from_checkpoint(checkpoint_path, map_location=torch.device(args.device))
+checkpoint_path = resolve_checkpoint(args.checkpoint_path, args.checkpoint_index)
+model = LightningModel.load_from_checkpoint(
+    checkpoint_path, map_location="cpu", strict=True
+)
 
 print("!!! Forcing Model Controls !!!")
 
-model.prob_2d = 1  
-model.num_slices = 1 
+model.prob_2d = 1
+model.num_slices = 1
 
 model._sample_strategy = lambda dataset_name: 0
 print("-> Evaluation Mode ON: Model strategy forced to 0 (Random Visual Context only).")
 
-def random_extract_slices(self, img_3d_group, lab_3d_group, axis, num_samples, batch_idx):
-    """
-    Random Context Retrieval:
-    Randomly extract slices containing foreground to serve as Context, without morphological or pseudo-label matching.
-    """
-    G = img_3d_group.shape[0]
-    selected_indices_matrix = torch.zeros((G, num_samples), dtype=torch.long, device=self.device)
-    
-    local_target_dim = axis + 1
-    dims_to_sum = [0, 1, 2, 3]
-    dims_to_sum.remove(local_target_dim)
 
-    group_metadata = []
-    for g in range(G):
-        lab = lab_3d_group[g]
-        slice_areas = lab.sum(dim=tuple(dims_to_sum)).float()
-        
-        if slice_areas.max() > 0:
-            valid_mask = slice_areas > 0.0
-            valid_indices = torch.nonzero(valid_mask).view(-1)
-            valid_weights = torch.ones_like(valid_indices, dtype=torch.float)
-            
-            group_metadata.append({
-                'valid': True, 
-                'valid_indices': valid_indices, 
-                'weights': valid_weights,
-                'max_dim': lab.shape[local_target_dim]
-            })
-        else:
-            group_metadata.append({'valid': False, 'max_dim': lab.shape[local_target_dim]})
+def random_extract_slices(
+    self, images, masks, axis, num_samples, context_multiplier, target_g
+):
+    """Sample each case independently and uniformly among foreground slices."""
+    spatial_axis = axis + 1
+    reduce_dims = tuple(i for i in range(4) if i != spatial_axis)
 
-    for n in range(num_samples):
-        valid_g_indices = [i for i, meta in enumerate(group_metadata) if meta['valid']]
-    
-        if not valid_g_indices:
-            for g in range(G):
-                selected_indices_matrix[g, n] = torch.randint(0, group_metadata[g]['max_dim'], (1,)).item()
-            continue
-        
-        leader_g = random.choice(valid_g_indices)
-        leader_meta = group_metadata[leader_g]
-        
-        sample_idx_local = torch.multinomial(leader_meta['weights'], 1, replacement=True).item()
-        leader_abs_idx = leader_meta['valid_indices'][sample_idx_local].item()
-        selected_indices_matrix[leader_g, n] = leader_abs_idx
-        
-        for g in range(G):
-            if g == leader_g: 
-                continue
-            follower_meta = group_metadata[g]
-            
-            if follower_meta['valid']:
-                random_idx = torch.randint(0, len(follower_meta['valid_indices']), (1,)).item()
-                best_abs_idx = follower_meta['valid_indices'][random_idx].item()
-                selected_indices_matrix[g, n] = best_abs_idx
-            else:
-                selected_indices_matrix[g, n] = torch.randint(0, follower_meta['max_dim'], (1,)).item()
+    def draw(case, count):
+        valid = (masks[case].sum(dim=reduce_dims) > 0).nonzero().flatten()
+        if not valid.numel():
+            valid = torch.arange(masks[case].shape[spatial_axis], device=masks.device)
+        indices = valid[torch.randint(len(valid), (count,), device=valid.device)]
+        return tuple(
+            x[case].index_select(spatial_axis, indices).movedim(spatial_axis, 0)
+            for x in (images, masks)
+        )
 
-    out_img_group = []
-    out_lab_group = []
-    for g in range(G):
-        img = img_3d_group[g]; lab = lab_3d_group[g]; indices = selected_indices_matrix[g]
-        imgs_list = []; labs_list = []
-        for idx in indices:
-            idx_tensor = idx.view(1)
-            curr_img = torch.index_select(img, local_target_dim, idx_tensor).squeeze(local_target_dim)
-            curr_lab = torch.index_select(lab, local_target_dim, idx_tensor).squeeze(local_target_dim)
-            imgs_list.append(curr_img); labs_list.append(curr_lab)
-        out_img_group.append(torch.stack(imgs_list, dim=0))
-        out_lab_group.append(torch.stack(labs_list, dim=0))
-        
-    return torch.stack(out_img_group, dim=0), torch.stack(out_lab_group, dim=0)
+    target, label = draw(target_g, num_samples)
+    supports = [
+        draw(g, num_samples * context_multiplier)
+        for g in range(len(images))
+        if g != target_g
+    ]
+    contexts = [
+        torch.cat(
+            [
+                item.reshape(num_samples, context_multiplier, *item.shape[1:])
+                for item in group
+            ],
+            dim=1,
+        )
+        for group in zip(*supports)
+    ]
+    return target, label, *contexts
 
-model._extract_slices_single_axis = types.MethodType(random_extract_slices, model)
-print("-> Slices extraction method patched: Random Valid Retrieval (Foreground Only).")
-# =========================================================================
 
+model._extract_multi_context_slices = types.MethodType(random_extract_slices, model)
 total_params = sum(p.numel() for p in model.parameters())
 print("Total number of parameters: ", total_params)
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Number of trainable parameters: ", trainable_params)
 
 dataset_val = MetaDataset_Multi_Extended(
-        dataset_dir = args.data_dir, 
-        skip_resize = args.skip_resize,
-        data_loading_config = data_loading_config,
-        train_or_val = 'val',
-        train_or_val_split_rate = args.train_or_val_split_rate,
-        group_size = args.context_size+1,
-        DDPM = '_DDPM' in args.model_name,
-        len_divid = args.len_divid,
-        cut_length = True)
+    dataset_dir=args.data_dir,
+    skip_resize=args.skip_resize,
+    data_loading_config=data_loading_config,
+    train_or_val="val",
+    train_or_val_split_rate=args.train_or_val_split_rate,
+    group_size=args.context_size + 1,
+    DDPM="_DDPM" in args.model_name,
+    len_divid=args.len_divid,
+    cut_length=True,
+)
 
 dataset_val.len_divid = 4
 batchsize = args.batch_size
 
-dataloader_val = DataLoader(dataset_val, 
-                            batch_size=batchsize,
-                            num_workers=args.workers,
-                            pin_memory=True,
-                            persistent_workers=True)
+dataloader_val = DataLoader(
+    dataset_val,
+    batch_size=batchsize,
+    num_workers=args.workers,
+    pin_memory=True,
+    persistent_workers=args.workers > 0,
+)
 
-trainer = pl.Trainer(logger=False, enable_checkpointing=False)
+trainer = evaluation_trainer(args.device)
 
-target_prompt_types = ['dense']
+target_prompt_types = ["dense"]
 final_results = {}
 
-print("="*50)
+print("=" * 50)
 print(f"Starting Individual Prompt Evaluation for: {target_prompt_types}")
-print("="*50)
+print("=" * 50)
 
 for p_type in target_prompt_types:
     print(f"\n>>> Evaluating Prompt Type: [ {p_type} ] ...")
-    
-    model.prompt_types_2d = [p_type] 
-    model.prompt_types_3d = [p_type] 
+
+    model.prompt_types_2d = [p_type]
+    model.prompt_types_3d = [p_type]
     model.visualize_results = lambda *args, **kwargs: None
     # ==================================================
-    
+
     trainer.validate(model, dataloaders=dataloader_val)
-    
-    metrics_dict = {key: (value.item() if isinstance(value, torch.Tensor) else value) for key, value in metrics.items()}
+
+    metrics_dict = {
+        key: (value.item() if isinstance(value, torch.Tensor) else value)
+        for key, value in trainer.callback_metrics.items()
+    }
     final_results[p_type] = metrics_dict
     print(f">>> Result for {p_type}: {metrics_dict}")
 
 current_time = datetime.now().strftime("%H%M%S")
 
-if hasattr(model, 'prob_2d') and model.prob_2d==1 :
+if hasattr(model, "prob_2d") and model.prob_2d == 1:
     mode_tag = "_2D"
-elif hasattr(model, 'prob_2d') and model.prob_2d==0 :
+elif hasattr(model, "prob_2d") and model.prob_2d == 0:
     mode_tag = "_3D"
 else:
     mode_tag = "_mix"
@@ -203,17 +155,17 @@ os.makedirs(safe_save_dir, exist_ok=True)
 
 base_ckpt_name = os.path.basename(checkpoint_path)
 new_file_name = base_ckpt_name.replace(
-    '.ckpt', 
-    f'_FLARE22_Sample_context{str(args.context_size)}{mode_tag}_Random_Retrieval_{current_time}_ICL.json'
+    ".ckpt",
+    f"_FLARE22_Sample_context{str(args.context_size)}{mode_tag}_Random_Retrieval_{current_time}_ICL.json",
 )
 
 save_filename = os.path.join(safe_save_dir, new_file_name)
 
 print("\nFinal Results Dict:", json.dumps(final_results, indent=4))
 
-with open(save_filename, 'w') as f:
+with open(save_filename, "w") as f:
     json.dump(final_results, f, indent=4)
 
-print("="*50)
+print("=" * 50)
 print(f"Detailed evaluation metrics saved to:\n{save_filename}")
-print("="*50)
+print("=" * 50)
