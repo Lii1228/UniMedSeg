@@ -16,8 +16,8 @@ Place the weight files in `UniMedSeg/checkpoints/`. Each exported checkpoint con
 
 | Model | Weight file | Width | Transformer blocks | Attention heads | Source checkpoint |
 | --- | --- | ---: | ---: | ---: | --- |
-| UniMedSeg-S | `UniMedSeg-S.ckpt` | 432 | 12 | 6 | Epoch 11, step 1573 |
-| UniMedSeg-L | `UniMedSeg-L.ckpt` | 864 | 20 | 12 | Version 39, epoch 16, step 4978 |
+| UniMedSeg-S | [UniMedSeg-S.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-S.ckpt) | 432 | 12 | 6 | Epoch 11, step 1573 |
+| UniMedSeg-L | [UniMedSeg-L.ckpt](https://github.com/Lii1228/UniMedSeg/releases/download/s-l-weights-v1/UniMedSeg-L.ckpt) | 864 | 20 | 12 | Version 39, epoch 16, step 4978 |
 
 The exported files have these SHA-256 checksums. Run `sha256sum UniMedSeg/checkpoints/*.ckpt` to check a download.
 
