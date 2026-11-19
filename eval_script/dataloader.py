@@ -74,19 +74,17 @@ class MetaDataset_Multi(Dataset):
             self.task_sample_rate.append(i["sample rate"])
 
     def loaddata_from_config(self, dataset_dir, i):
-        image_dir = os.path.join(dataset_dir, i["name"], "imagesTr")
-        #         samples = [f for f in os.listdir(image_dir) if os.path.isfile(os.path.join(image_dir, f)) and '0000' in f]
-        samples = [f for f in os.listdir(image_dir) if "0000" in f]
-        samples = ["_".join(f.split("_")[:-1]) for f in samples]
-        samples = sorted(list(set(samples)))
-
-        with open(
-            os.path.join(dataset_dir, i["name"], "dataset.json"), "r", encoding="utf-8"
-        ) as file:
+        dataset_path = os.path.join(dataset_dir, i.get("directory", i["name"]))
+        image_dir = os.path.join(dataset_path, "imagesTr")
+        with open(os.path.join(dataset_path, "dataset.json"), encoding="utf-8") as file:
             config = json.load(file)
+        suffix = "_0000" + config["file_ending"]
+        samples = sorted(
+            f[: -len(suffix)] for f in os.listdir(image_dir) if f.endswith(suffix)
+        )
         data_samples_tmp = [
             {
-                "sample": os.path.join(dataset_dir, i["name"], "imagesTr", k),
+                "sample": os.path.join(image_dir, k),
                 "input": i["input"],
                 "output": i["output"],
                 "task": i["task"],
@@ -239,8 +237,9 @@ class MetaDataset_Multi(Dataset):
     def load_data(self, sample, key):
         # Load images for the given input_
         images = []
-        label_dir = sample["sample"].replace("imagesTr", "labelsTr")
         image_dir = sample["sample"]
+        dataset_path = os.path.dirname(os.path.dirname(image_dir))
+        label_dir = os.path.join(dataset_path, "labelsTr", os.path.basename(image_dir))
         config = sample["config"]
         mod = sample[key]
 

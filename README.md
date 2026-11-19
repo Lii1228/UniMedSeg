@@ -39,7 +39,7 @@ bash run_training.sh --variant S --init UniMedSeg/checkpoints/UniMedSeg-S.ckpt \
     --max_epochs 1 --limit_train_batches 1 --limit_val_batches 1
 ```
 
-For 3D training with weak prompts, set `DATA_ROOT` to the preprocessed training collection. To initialize from base weights, set `BASE_WEIGHTS` to a weight file that matches the model size and pass it with `--init`.
+For 3D training with weak prompts, set `DATA_ROOT` to the parent directory of your nnU-Net datasets and edit `train_script/train.json` to include the tasks you want to train on. To initialize from base weights, set `BASE_WEIGHTS` to a weight file that matches the model size and pass it with `--init`.
 
 ```bash
 python -m train_script.train \
@@ -65,20 +65,39 @@ The launcher honors `--precision 32` as FP32. Use `--precision 16-mixed` for the
 
 ### Training data
 
-Both models use the 473 tasks in [train.json](train_script/train.json). For a custom dataset, pass `--task_config` with a task list in the same format as [the Liver example](Liver/Liver.json). Each task specifies an input channel, foreground labels, and a sampling weight (`sample rate`).
+[train.json](train_script/train.json) contains three example tasks from [BraTS 2021](https://www.med.upenn.edu/cbica/brats2021/), [AMOS 2022](https://amos22.grand-challenge.org/) and the [Medical Segmentation Decathlon heart task](https://medicaldecathlon.com/). Keep the entries for datasets you have and add your own to the same JSON array. You can also pass a separate file with `--task_config path/to/tasks.json`.
 
-Training uses 3D batches by default. Set `--prob_2d` to the desired fraction of 2D batches. Run `python -m train_script.train --help` for the available options.
-
-A dataset named `Liver` is read from the following paths.
+Prepare each dataset as paired NIfTI images and integer segmentation masks using the [nnU-Net v2 dataset format](https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/dataset_format.md). For example, a single-channel renal MRI dataset with two labeled cases has this layout.
 
 ```text
-DATA_ROOT/Liver/
+DATA_ROOT/RenalMRI/
     dataset.json
-    imagesTr/CASE_0000.nii.gz
-    labelsTr/CASE.nii.gz
+    imagesTr/case01_0000.nii.gz
+    imagesTr/case02_0000.nii.gz
+    labelsTr/case01.nii.gz
+    labelsTr/case02.nii.gz
 ```
 
-The loader sorts case IDs and reserves the last 10% for validation, rounding the training count down. Each training group contains one target and `context_size` support volumes sampled with replacement from the same task and split. With `--skip_resize True`, supply aligned 128 x 128 x 128 images and labels. Use `--skip_resize False` to crop, pad and resize during loading. The bundled Brain case is for text evaluation. The Liver sample has cases in both training and validation splits.
+In the dataset's own `dataset.json`, declare the image channels in `channel_names`, the integer mask IDs in `labels` (for example, `{"background": 0, "kidney": 1}`), `numTraining` and `file_ending` (here `.nii.gz`). Images and masks for each case must share the same geometry.
+
+To train on kidneys in this example, append the following object to `train.json`.
+
+```json
+{
+  "name": "Renal MRI Study",
+  "directory": "RenalMRI",
+  "input": 0,
+  "output": "Seg",
+  "task": "Seg",
+  "task_config": {"foreground_classes": [1]},
+  "sample rate": 1,
+  "weight": 1
+}
+```
+
+`name` is the dataset's full name. Set `directory` to its existing folder name under `DATA_ROOT`. If omitted, the loader uses `name` as the folder name. `input` selects the image channel (0 reads `_0000`). `foreground_classes` lists the mask IDs to combine into one target. To sample foreground labels at random, use `"foreground_classes": "random"` with `"remove": [0]` to exclude background. `sample rate` controls how often the loader selects the task relative to the other entries.
+
+Provide at least two labeled cases per dataset. The loader sorts case IDs, uses the first 90% for training (rounded down), and reserves the rest for validation. Each group contains one target and `context_size` support volumes from the same task and split. With `--skip_resize True`, supply aligned 128 × 128 × 128 volumes. Use `--skip_resize False` to crop, pad and resize during loading. Training uses 3D batches by default. Set `--prob_2d` to the desired fraction of 2D batches.
 
 ### Checkpoints and resuming
 
