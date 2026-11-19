@@ -39,11 +39,11 @@ bash run_training.sh --variant S --init UniMedSeg/checkpoints/UniMedSeg-S.ckpt \
     --max_epochs 1 --limit_train_batches 1 --limit_val_batches 1
 ```
 
-For 3D training with weak prompts, set `DATA_ROOT` to the preprocessed training collection. This example initializes from the public S weights.
+For 3D training with weak prompts, set `DATA_ROOT` to the preprocessed training collection. To initialize from base weights, set `BASE_WEIGHTS` to a weight file that matches the model size and pass it with `--init`.
 
 ```bash
 python -m train_script.train \
-    --variant S --init UniMedSeg/checkpoints/UniMedSeg-S.ckpt \
+    --variant S --init "${BASE_WEIGHTS}" \
     --data_dir "${DATA_ROOT}" --train_gpus '(0,1,2,3,4,5,6,7)' \
     --precision 32 --validation_first 0 --workers 8 --loss_seg DiceCE_loss \
     --lr 0.00001 --lr_decline_patience 120 --skip_resize True --len_divid 50 \
@@ -53,7 +53,13 @@ python -m train_script.train \
     --prob_ct 0 --prob_act 0 --flip_prob 0 --sobel_prob 0
 ```
 
-A checkpoint directory uses lexicographic filename order, matching the research launcher. An explicit filename selects exactly one checkpoint. For L fine-tuning, replace the S variant and initialization arguments with `--variant L --init UniMedSeg/checkpoints/UniMedSeg-L.ckpt`.
+To train from scratch, omit `--init`. The following command uses the same training defaults on eight GPUs.
+
+```bash
+python -m train_script.train --variant S --data_dir "${DATA_ROOT}" --train_gpus '(0,1,2,3,4,5,6,7)'
+```
+
+For UniMedSeg-L, use `--variant L`. When initializing from base weights, select the L weight file.
 
 The launcher honors `--precision 32` as FP32. Use `--precision 16-mixed` for the precision used by the original server launcher. With `--grad_checkpointing_base 0`, large math-backend attention matrices are evaluated in query blocks. Every query still attends to its full set of keys. Set the flag to `1` to let PyTorch select a fused backend when available. Multi-GPU runs use Gloo by default. NCCL is available via `--ddp_backend nccl`.
 
@@ -61,7 +67,7 @@ The launcher honors `--precision 32` as FP32. Use `--precision 16-mixed` for the
 
 Both models use the 473 tasks in [train.json](train_script/train.json). For a custom dataset, pass `--task_config` with a task list in the same format as [the Liver example](Liver/Liver.json). Each task specifies an input channel, foreground labels, and a sampling weight (`sample rate`).
 
-Omit `--init` to train from random initialization. Training uses 3D batches by default. Set `--prob_2d` to the desired fraction of 2D batches. Run `python -m train_script.train --help` for the available options.
+Training uses 3D batches by default. Set `--prob_2d` to the desired fraction of 2D batches. Run `python -m train_script.train --help` for the available options.
 
 A dataset named `Liver` is read from the following paths.
 
